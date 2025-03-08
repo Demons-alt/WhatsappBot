@@ -1,6 +1,7 @@
+require('dotenv').config()
 const express = require('express');
 const app = express();
-const port = 3000;
+const port = process.env.PORT || 3000;
 const pino = require('pino');
 const axios = require('axios');
 const QRCode = require('qrcode');
@@ -15,101 +16,90 @@ const logger = pino({
   }
 });
 
-const client = new Client();
 let base64qr = false;
 
-const send2AI = (params, model ='deepseek-r1:1.5b', role='user') => {
-  return axios.post('http://192.168.100.222/ollama/api/chat', {
-    "model": model,
-    "messages": [
-      {
-        "role": role,
-        "content": params
-      }
-    ],
-    "stream": false
-  }, {
-    timeout: 3600000
-  })
-  .then(function (response) {
-    logger.info(response.data)
-    return response.data
-  })
-  .catch(function (error) {
-    logger.error(error)
-    throw(error);
-  });
-}
+const client = new Client({
+  puppeteer: {
+    headless: true,
+    args: ['--no-sandbox', '--disable-setuid-sandbox']
+  }
+});
+
+const send2AI = async (params, model = process.env.MODEL, role = 'user') => {
+  try {
+    const { data } = await axios.post(process.env.OLLAMA_API, {
+      model: model,
+      messages: [{ role: role, content: params }],
+      stream: false
+    }, { timeout: 3600000 });
+
+    logger.info(data);
+    return data.message.content.replace(/<think>[\s\S]*?<\/think>\s*/g, "").replace(/\n+/g, " ");
+  } catch (error) {
+    logger.error(error);
+    throw "Maaf, AI sedang sibuk!";
+  }
+};
 
 // Ketika Client Siap
-client.once('ready', () => {
-  logger.info('Client is ready!');
+client.on('ready', () => {
+  logger.info('✅ WhatsApp Bot is Ready!');
 });
 
-// Ketika menerima QR
+// QR Code Event
 client.on('qr', (qr) => {
-  base64qr = qr; // QR disimpan di variable
-  logger.info(`QR RECEIVED : ${qr}`);
+  base64qr = qr;
+  logger.info(`🚨 QR RECEIVED`);
 });
 
-// Listener pesan masuk
-client.on('message_create', message => {
-  const msg = message.body
-  if ( msg === 'hello') {
-      return client.sendMessage(message.from, 'hello i am a personal asistant please type "AI:" before type message for response from AI, example "AI: why the color sky blue?" ')
+// Pesan Masuk
+client.on('message', async (message) => {
+  const msg = message.body;
+  
+  if (msg.toLowerCase() === 'hello') {
+    return client.sendMessage(message.from, 'Hello! I am your AI Assistant. Type **AI:** followed by your question.');
   }
-  if (msg === '!ping') {
-    return client.sendMessage(message.from, 'pong');
+
+  if (msg.toLowerCase() === '!ping') {
+    return client.sendMessage(message.from, 'Pong! 🏓');
   }
-  if (msg.startsWith("AI:") || msg.startsWith("ai:") ){
-    return send2AI(msg.replace(/^AI:\s*/i, "").trim()).then(response => {
-      let result = response.message.content.replace(/<think>[\s\S]*?<\/think>\s*/g, "");
-      result = result.replace(/\n+/g, " ");
-      result = result.replace(/<think>[\s\S]*?<\/think>\s*/g, "").replace(/<\/think>\s*/g, " ")
+
+  if (msg.startsWith("AI:") || msg.startsWith("ai:")) {
+    const question = msg.replace(/^AI:\s*/i, "").trim();
+    try {
+      const result = await send2AI(question);
       return client.sendMessage(message.from, result);
-    }).catch(error => client.sendMessage(message.from, error))
-   
-  }
-});
-
-// API Generate QR
-app.get('/', async (req, res) => {
-  try {
-    if (!base64qr) {
-      return res.send('Loading QR... please wait!');
+    } catch (error) {
+      return client.sendMessage(message.from, error);
     }
-
-    // Generate QR dari Base64 ke PNG Buffer
-    const qrImage = await QRCode.toBuffer(base64qr);
-
-    // Set Header Response Image
-    res.setHeader('Content-Type', 'image/png');
-    res.send(qrImage);
-  } catch (error) {
-    logger.error(error);
-    res.status(500).send('Failed to generate QR Code');
   }
 });
 
+// API Endpoint untuk QR
+app.get('/', async (req, res) => {
+  if (!base64qr) {
+    return res.send('⏳ Loading QR... Please wait!');
+  }
+  const qrImage = await QRCode.toBuffer(base64qr);
+  res.setHeader('Content-Type', 'image/png');
+  res.send(qrImage);
+});
+
+// Test AI API
 app.get('/AI', async (req, res) => {
+  const { question } = req.query;
+  if (!question) return res.status(400).send("Question is required!");
+
   try {
-  const { question } = req.params
-  logger.debug(req)
-  const response = await send2AI(question)
-  let result = response.message.content.replace(/<think>[\s\S]*?<\/think>\s*/g, "");
-
-  result = result.replace(/\n+/g, " ");
-  result = result.replace(/<think>[\s\S]*?<\/think>\s*/g, "").replace(/<\/think>\s*/g, " ")
-
-  res.send(result.trim());
+    const response = await send2AI(question);
+    res.send(response);
   } catch (error) {
-    logger.error(error);
-    res.status(500).send('Failed to generate QR Code');
+    res.status(500).send(error);
   }
 });
 
 // Jalankan Server
 app.listen(port, () => {
   client.initialize();
-  logger.info(`Example app listening on port http://localhost:${port}`);
+  logger.info(`🚀 Server running at http://localhost:${port}`);
 });
